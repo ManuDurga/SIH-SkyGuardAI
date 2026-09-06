@@ -12,11 +12,13 @@ import pandas as pd
 RNG = np.random.default_rng(7)
 
 STATIONS = [
-    ("AWS-PB-07", "Punjab"),
-    ("AWS-HP-12", "Himachal Pradesh"),
-    ("AWS-UK-04", "Uttarakhand"),
-    ("AWS-UP-31", "Uttar Pradesh"),
-    ("AWS-RJ-22", "Rajasthan"),
+    ("AWS-UK-DDN", "Dehradun"),
+    ("AWS-RJ-JPR", "Jaipur"),
+    ("AWS-KL-TVM", "Thiruvananthapuram"),
+    ("AWS-DL-DEL", "Delhi"),
+    ("AWS-MP-BPL", "Bhopal"),
+    ("AWS-BR-PAT", "Patna"),
+    ("AWS-AS-GHY", "Guwahati"),
 ]
 
 BASE = {"temperature": 25.0, "pressure": 1013.0, "humidity": 55.0}
@@ -97,11 +99,13 @@ def generate_dataset(n_points=300, freq_minutes=15, scenarios=None, seed=7):
     rng = np.random.default_rng(seed)
     if scenarios is None:
         scenarios = {
-            "AWS-PB-07": "normal",
-            "AWS-HP-12": "frozen",
-            "AWS-UK-04": "spike",
-            "AWS-UP-31": "storm",
-            "AWS-RJ-22": "flood",
+            "AWS-UK-DDN": "frozen",
+            "AWS-RJ-JPR": "normal",
+            "AWS-KL-TVM": "flood",
+            "AWS-DL-DEL": "spike",
+            "AWS-MP-BPL": "storm",
+            "AWS-BR-PAT": "flood",
+            "AWS-AS-GHY": "normal",
         }
 
     start_ts = pd.Timestamp("2026-09-01 00:00:00")

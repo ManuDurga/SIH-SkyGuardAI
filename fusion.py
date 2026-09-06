@@ -61,7 +61,7 @@ def classify_station(g: pd.DataFrame) -> dict:
     # 2. Sustained, physically-coherent drift (temp+pressure down) that
     #    persists for most of the recent window -> a real weather event.
     #    Longer / more persistent -> flood; shorter but still sustained -> storm.
-    elif weather_shape and run_len >= max(15, n * 0.08):
+    elif weather_shape and run_len >= max(15, n * 0.05):
         predicted = "flood" if (run_len >= n * 0.25 or late_frac >= 0.5) else "storm"
     # 3. Everything else that trips the rate-of-change rule in short, scattered
     #    bursts rather than one sustained streak -> sensor miscalibration.
