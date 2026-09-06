@@ -31,6 +31,7 @@ which scenario via the `scenarios` dict at the top of
 | `fusion.py` | Combines rule flags + IF score + SHAP root cause into a classification, confidence, severity, RCA sentence, and per-station sensor health |
 | `main.py` | Orchestrates the full pipeline and prints/exports a report |
 | `app.py` | FastAPI wrapper exposing `/analyze` |
+| `test_novel_patterns.py` | Regression check: novel patterns must not be force-fit into a known archetype |
 
 ## Run it
 
@@ -44,29 +45,89 @@ uvicorn app:app --reload       # or serve it — GET /analyze for live JSON
 
 ## How the classification actually works
 
-- **Frozen** is caught mainly by the *rule* layer: a rolling standard
-  deviation of ~0 for a long, sustained streak. Isolation Forest alone
-  under-weights this because "very calm" doesn't look statistically extreme
-  in z-score/rate space — this is a good example of why the rule-based layer
-  exists alongside the ML layer, not instead of it.
-- **Spike** shows up as short, scattered bursts that trip the rate-of-change
-  rule and the IF score, but never form one sustained streak.
-- **Storm / Flood** both show the same physical signature (pressure down,
-  temperature down, humidity up toward saturation) — they're told apart by
-  *how long and how completely* that signature persists: a short sustained
-  run → storm, a longer one covering most of the recent window → flood.
-  This boundary is inherently fuzzy (that's realistic — the difference
-  really is duration, not shape), so expect occasional storm/flood
-  disagreement at the margin; frozen/spike/normal are clean.
-- **Confidence** blends the Isolation Forest's abnormality magnitude with
-  how strongly the rule layer agrees. **Support** reports how many
-  intervals were flagged and the longest consecutive run.
-- **Sensor health** (frozen/spike stations only) and the **fleet-wide
-  prediction score** are derived from how many stations show mild
-  (70-89%) vs severe (<70%) fault signatures; the alert trigger fires
-  at ≤70%, matching the dashboard.
+**v3 design change: hierarchical classification.** Earlier versions
+scored all four archetypes (frozen/spike/storm/flood) continuously
+instead of using a hard `if/elif` cascade — an improvement over the
+original, which force-fit everything into one of four labels — but still
+let all four compete in one flat ranking. That meant a weak weather-side
+score could still technically "win" over an even weaker sensor-side
+score. Classification is now genuinely hierarchical, in two stages:
 
-## Using real historical data instead of synthetic data
+1. **Broad type first.** Before naming any specific archetype, decide
+   whether the evidence looks sensor-like, weather-like, or insufficient
+   for either — using `max(frozen_score, spike_score)` vs.
+   `max(storm_score, flood_score)`, gated by a minimum evidence floor and
+   a margin between the two sides. Storm and spike, for example, are
+   never compared head-to-head to pick a "winner" — they answer different
+   questions (weather vs. sensor) and only ever compete within their own
+   branch.
+2. **Subtype only within the winning branch.** Once the broad type is
+   decided, the specific archetype (frozen vs. spike, or storm vs. flood)
+   still has to clear its own confidence floor and margin over its
+   in-branch runner-up. If it doesn't, the result falls back within that
+   branch — it's never re-routed across branches.
+
+The full output hierarchy:
+
+```text
+NORMAL
+
+Sensor fault:  FROZEN, SPIKE, else OTHER_SENSOR_FAULT
+Weather event: STORM, FLOOD, else OTHER_WEATHER_EVENT
+Neither branch has enough evidence: UNKNOWN_ANOMALY
+```
+
+- **Baselines are computed per-station, not hard-coded.** An early
+  version compared every station's temperature/pressure against the
+  synthetic simulator's constants (25°C / 1013 hPa) directly in the
+  classification logic and RCA text — which would silently misjudge any
+  station with a different climate baseline (Guwahati vs. Jaipur, for
+  instance). Now each station's own recent readings set its baseline
+  before any percentage change is computed.
+- **The four main archetypes stay the priority.** `FROZEN`, `SPIKE`,
+  `STORM`, and `FLOOD` are still what the project is built to detect and
+  demonstrate — `OTHER_SENSOR_FAULT`, `OTHER_WEATHER_EVENT`, and
+  `UNKNOWN_ANOMALY` are fallback states, not additional primary
+  scenarios. They exist so the four main outputs stay trustworthy: a
+  known label is only returned when there's positive evidence for it,
+  never just because it happened to be the least-weak option among four
+  weak matches.
+  `test_novel_patterns.py` checks this directly: it feeds the pipeline a
+  synthetic "heatwave" (temperature up, humidity down — the opposite sign
+  of the storm/flood signature) and a slow-drifting pressure sensor
+  (neither flat nor bursty), and asserts neither gets force-fit into
+  storm/flood or frozen/spike respectively. Run `python
+  test_novel_patterns.py` to see it pass — and feel free to add your own
+  novel synthetic scenarios there to stress-test the boundary further.
+- **Storm vs. flood is still the fuzziest known-archetype boundary** (same
+  underlying physics, told apart mainly by duration) — occasionally this
+  now reports `OTHER_WEATHER_EVENT` at the margin instead of forcing a
+  pick between the two. That's the intended trade-off: less
+  complete-looking output, fewer confidently wrong labels.
+- **Confidence** for a named archetype (`FROZEN`/`SPIKE`/`STORM`/`FLOOD`)
+  blends its subtype match score and its margin over its in-branch
+  runner-up. For `OTHER_SENSOR_FAULT` / `OTHER_WEATHER_EVENT`, confidence
+  reflects how sure the model is of the *broad* type, not the specific
+  archetype. For `UNKNOWN_ANOMALY`, confidence is capped lowest of all —
+  it means "confident something is anomalous," not "confident which
+  broad type it even is." **Support** reports how many intervals were
+  flagged, the longest consecutive run, and the full four-way score
+  breakdown.
+- **Sensor health** now also covers `OTHER_SENSOR_FAULT` stations (they
+  still warrant equipment follow-up even though the exact fault mode
+  couldn't be named), while `OTHER_WEATHER_EVENT` / `UNKNOWN_ANOMALY` get
+  no health score (not confirmed to be equipment-related). The
+  **fleet-wide prediction score** and the ≤70% alert trigger are
+  unchanged.
+- **Known limitation:** the underlying rule/ML detection layer (not
+  `fusion.py`) is tuned for the fault/event durations in this dataset. A
+  *very* slow, gradual sensor drift (small per-interval change,
+  accumulating over hundreds of intervals) can fall under both the
+  rolling z-score and rate-of-change thresholds and simply not get
+  flagged at all — a false negative rather than a false positive, but
+  worth knowing about and tuning `features.py`/`rules.py` for if
+  slow-drift faults matter for your deployment.
+
 
 Everything downstream of `simulate.py` — `features.py`, `rules.py`,
 `model.py`, `explain.py`, `fusion.py` — only cares about getting a pandas
@@ -159,3 +220,22 @@ The storm/flood boundary is heuristic and threshold-based (see `fusion.py`,
 real-world dataset. For the hackathon, that's the one number worth being
 ready to defend to judges; everything else (frozen/spike/normal) classifies
 cleanly across random seeds.
+
+
+## Hierarchical anomaly classification
+
+SkyGuard keeps four primary supported anomaly outputs: **Frozen**, **Spike**, **Storm**, and **Flood**.
+It does not force every abnormal pattern into one of those four labels. The fusion layer first decides whether the evidence is broadly **sensor-like**, **weather-like**, or **ambiguous**, using generic behaviour rather than the four subtype scores. Only then does it attempt subtype classification.
+
+Fallback outputs are:
+
+- `other_sensor_fault` — sensor-like anomaly that does not confidently match Frozen or Spike
+- `other_weather_event` — weather-like anomaly that does not confidently match Storm or Flood
+- `unknown_anomaly` — anomaly with insufficient/conflicting broad evidence
+
+Examples used in regression testing:
+
+- a sustained heatwave-like temperature rise with falling humidity -> `other_weather_event`
+- a smooth isolated pressure calibration drift -> `other_sensor_fault`
+
+This separation is intentional: **failure to match Storm/Flood is not evidence of a sensor fault, and failure to match Frozen/Spike is not evidence of a weather event.**
